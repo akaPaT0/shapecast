@@ -5,6 +5,10 @@ export const maxDuration = 30; // Quick checks and transitions happen here
 
 const SPACE = "https://tencent-hunyuan3d-2.hf.space";
 
+// Set of eventIds currently polling Gradio. Prevents concurrent requests from
+// the client's setInterval from trying to read the same SSE stream simultaneously.
+const activePolls = new Set<string>();
+
 /**
  * Reads ONE SSE event from the Gradio event stream without keeping the
  * connection open. We fetch the stream, read only until we get the first
@@ -24,8 +28,9 @@ async function pollGradioSse(
   | { status: "error"; message: string }
 > {
   const controller = new AbortController();
-  // 8s timeout — if we don't get a complete/error in 8s the job is still running
-  const timer = setTimeout(() => controller.abort(), 8000);
+  // 50s timeout — lets the job complete on the server side in a single request
+  // (takes ~17s) so that the SSE connection is never closed prematurely.
+  const timer = setTimeout(() => controller.abort(), 50000);
 
   try {
     const res = await fetch(`${SPACE}/call/${apiName}/${eventId}`, {
@@ -206,13 +211,8 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Generating Stage ───────────────────────────────────────────────────
-    const result = await pollGradioSse("shape_generation", eventId);
-
-    if (result.status === "error") {
-      return NextResponse.json({ error: result.message }, { status: 502 });
-    }
-
-    if (result.status === "pending") {
+    // Prevent concurrent requests for the same eventId from trying to read the stream.
+    if (activePolls.has(eventId)) {
       return NextResponse.json({
         done: false,
         stage: "generating",
@@ -220,29 +220,49 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // complete
-    // result.data[0] = GLB file object (white_mesh.glb)
-    const glbUrl = extractUrl(result.data[0]);
+    activePolls.add(eventId);
 
-    if (!glbUrl) {
-      return NextResponse.json(
-        {
-          error: "Hunyuan3D-2 generation returned no files. The Space may be at capacity.",
-        },
-        { status: 502 }
-      );
+    try {
+      const result = await pollGradioSse("shape_generation", eventId);
+
+      if (result.status === "error") {
+        return NextResponse.json({ error: result.message }, { status: 502 });
+      }
+
+      if (result.status === "pending") {
+        return NextResponse.json({
+          done: false,
+          stage: "generating",
+          message: "Generating 3D mesh — this takes 30–120 s on the free tier…",
+        });
+      }
+
+      // complete
+      // result.data[0] = GLB file object (white_mesh.glb)
+      const glbUrl = extractUrl(result.data[0]);
+
+      if (!glbUrl) {
+        return NextResponse.json(
+          {
+            error: "Hunyuan3D-2 generation returned no files. The Space may be at capacity.",
+          },
+          { status: 502 }
+        );
+      }
+
+      // Logging required markers before returning
+      console.log("HUNYUAN3D_BACKEND_RUNNING");
+      console.log("[ShapeCast] returned file URL:", JSON.stringify(result.data[0]));
+      console.log("[ShapeCast] final URL sent to frontend:", glbUrl);
+
+      return NextResponse.json({
+        done: true,
+        glbUrl,
+        objUrl: null, // Hunyuan3D-2 shape_generation returns glb only by default
+      });
+    } finally {
+      activePolls.delete(eventId);
     }
-
-    // Logging required markers before returning
-    console.log("HUNYUAN3D_BACKEND_RUNNING");
-    console.log("[ShapeCast] returned file URL:", JSON.stringify(result.data[0]));
-    console.log("[ShapeCast] final URL sent to frontend:", glbUrl);
-
-    return NextResponse.json({
-      done: true,
-      glbUrl,
-      objUrl: null, // Hunyuan3D-2 shape_generation returns glb only by default
-    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[ShapeCast /api/generate/status]", message);
