@@ -117,15 +117,13 @@ async function pollGradioSse(
  */
 function extractUrl(value: unknown): string | null {
   if (!value) return null;
-  if (typeof value === "string" && value) return value;
   if (typeof value === "object") {
     const v = value as Record<string, unknown>;
-    // Prefer .url — it's fully-qualified when present
-    if (typeof v.url === "string" && v.url.length > 0) return v.url;
-    // Fall back to constructing from .path
-    // path looks like "/tmp/gradio/abc123/model.glb" (leading slash included)
+    // Hugging Face's returned .url contains /ca/ which 404s.
+    // We construct directly from the path using the /file= endpoint.
     if (typeof v.path === "string" && v.path.length > 0) {
       const cleanPath = v.path.startsWith("/") ? v.path : `/${v.path}`;
+      console.log("EXTRACT_URL_V2_RUNNING - Path:", cleanPath);
       return `${SPACE}/file=${cleanPath}`;
     }
   }
