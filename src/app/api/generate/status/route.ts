@@ -109,17 +109,24 @@ async function pollGradioSse(
 
 /**
  * Extract a usable URL string from a Gradio FileData object.
- * Prefers .url (absolute), falls back to constructing from .path.
+ *
+ * The Gradio /info schema shows url is typed as string|null with default null,
+ * so we must check typeof AND non-empty before trusting it.
+ * The path field starts with "/tmp/gradio/..." (already has leading slash),
+ * so we use "/file=" not "/file=/".
  */
 function extractUrl(value: unknown): string | null {
   if (!value) return null;
-  if (typeof value === "string") return value;
+  if (typeof value === "string" && value) return value;
   if (typeof value === "object") {
     const v = value as Record<string, unknown>;
-    if (typeof v.url === "string" && v.url) return v.url;
-    if (typeof v.path === "string" && v.path) {
-      // path is a server-relative path; prepend the Space base URL
-      return `${SPACE}/file=${v.path}`;
+    // Prefer .url — it's fully-qualified when present
+    if (typeof v.url === "string" && v.url.length > 0) return v.url;
+    // Fall back to constructing from .path
+    // path looks like "/tmp/gradio/abc123/model.glb" (leading slash included)
+    if (typeof v.path === "string" && v.path.length > 0) {
+      const cleanPath = v.path.startsWith("/") ? v.path : `/${v.path}`;
+      return `${SPACE}/file=${cleanPath}`;
     }
   }
   return null;
@@ -219,8 +226,22 @@ export async function GET(req: NextRequest) {
 
     // stage === "generating"
     // data[0] = OBJ (FileData), data[1] = GLB (FileData)
+    // Log the raw objects BEFORE extraction so we can see exactly what
+    // Hugging Face returns — url field, path field, and any other keys.
+    console.log(
+      "[ShapeCast] raw /generate output — data[0] (OBJ):",
+      JSON.stringify(result.data[0], null, 2)
+    );
+    console.log(
+      "[ShapeCast] raw /generate output — data[1] (GLB):",
+      JSON.stringify(result.data[1], null, 2)
+    );
+
     const objUrl = extractUrl(result.data[0]);
     const glbUrl = extractUrl(result.data[1]);
+
+    console.log("[ShapeCast] extracted objUrl:", objUrl);
+    console.log("[ShapeCast] extracted glbUrl:", glbUrl);
 
     if (!glbUrl && !objUrl) {
       return NextResponse.json(
