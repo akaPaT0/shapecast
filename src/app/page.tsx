@@ -5,12 +5,6 @@ import ImageDropzone from "@/components/ImageDropzone";
 import StatusLog from "@/components/StatusLog";
 import ModelViewerPanel from "@/components/ModelViewerPanel";
 
-interface PollState {
-  eventId: string;
-  stage: "preprocessing" | "generating";
-  meshResolution: number;
-}
-
 interface GenerateResult {
   glbUrl: string | null;
   objUrl: string | null;
@@ -27,14 +21,18 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GenerateResult | null>(null);
 
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, msg]);
 
-  const stopPolling = () => {
-    if (pollIntervalRef.current !== null) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
+  const stopStreaming = () => {
+    if (readerRef.current) {
+      try {
+        readerRef.current.cancel();
+      } catch (e) {
+        console.error("Error cancelling reader:", e);
+      }
+      readerRef.current = null;
     }
   };
 
@@ -46,11 +44,11 @@ export default function Home() {
     setError(null);
     setResult(null);
     setLogs([]);
-    stopPolling();
+    stopStreaming();
 
     try {
       // ── Step 1: Start the job ─────────────────────────────────────────
-      addLog("Uploading image to TripoSR…");
+      addLog("Uploading image and submitting job to Hunyuan3D-2…");
 
       const fd = new FormData();
       fd.append("image", imageFile);
@@ -75,75 +73,77 @@ export default function Home() {
         throw new Error((startJson.error as string) ?? "Failed to start generation.");
       }
 
-      addLog("Image uploaded — preprocessing queued…");
+      const eventId = startJson.eventId as string;
+      const spaceUrl = startJson.spaceUrl as string;
 
-      let pollState: PollState = {
-        eventId: startJson.eventId as string,
-        stage: startJson.stage as "preprocessing" | "generating",
-        meshResolution: startJson.meshResolution as number,
-      };
+      console.log("HUNYUAN3D_BACKEND_RUNNING");
+      console.log("[ShapeCast] event_id created:", eventId);
 
-      // ── Step 2: Poll /status every 3s ────────────────────────────────
-      pollIntervalRef.current = setInterval(async () => {
-        try {
-          const params = new URLSearchParams({
-            eventId: pollState.eventId,
-            stage: pollState.stage,
-            meshResolution: String(pollState.meshResolution),
-          });
+      addLog("✓ Job queued — connecting to Gradio event stream…");
 
-          const statusRes = await fetch(`/api/generate/status?${params}`);
+      // ── Step 2: Connect to Gradio SSE stream directly ────────────────
+      console.log("[ShapeCast] SSE connected to space:", spaceUrl);
+      const sseRes = await fetch(`${spaceUrl}/call/shape_generation/${eventId}`);
+      if (!sseRes.ok || !sseRes.body) {
+        throw new Error(`Failed to establish event stream (status ${sseRes.status})`);
+      }
 
-          let statusJson: Record<string, unknown>;
-          try {
-            statusJson = await statusRes.json();
-          } catch {
-            const text = await statusRes.text().catch(() => statusRes.statusText);
-            throw new Error(`Lost connection to generation job: ${text.slice(0, 200)}`);
+      const reader = sseRes.body.getReader();
+      readerRef.current = reader;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let lastEvent = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("event:")) {
+            lastEvent = trimmed.replace("event:", "").trim();
+          } else if (trimmed.startsWith("data:")) {
+            const raw = trimmed.replace("data:", "").trim();
+
+            if (lastEvent === "generating") {
+              addLog("Generating 3D mesh — this takes 15–30 s on the GPU queue…");
+            } else if (lastEvent === "complete") {
+              stopStreaming();
+              console.log("[ShapeCast] generation completed");
+
+              const parsed = JSON.parse(raw);
+              const data = Array.isArray(parsed) ? parsed : parsed?.data ?? [];
+              const fileObj = data[0]?.value || data[0];
+
+              if (!fileObj || typeof fileObj.path !== "string") {
+                throw new Error("Generation returned no valid 3D model path.");
+              }
+
+              const cleanPath = fileObj.path.startsWith("/") ? fileObj.path : `/${fileObj.path}`;
+              const glbUrl = `${spaceUrl}/file=${cleanPath}`;
+
+              console.log("[ShapeCast] final GLB URL:", glbUrl);
+              addLog("✓ 3D model generated successfully!");
+
+              setResult({
+                glbUrl,
+                objUrl: null,
+              });
+              setIsLoading(false);
+              return;
+            } else if (lastEvent === "error") {
+              stopStreaming();
+              throw new Error(`Gradio Space error: ${raw}`);
+            }
           }
-
-          if (!statusRes.ok || statusJson.error) {
-            throw new Error(
-              (statusJson.error as string) ?? `Status check failed (${statusRes.status})`
-            );
-          }
-
-          if (statusJson.message && typeof statusJson.message === "string") {
-            // Only log if it's a new message (avoid flooding with identical lines)
-            setLogs((prev) => {
-              const last = prev[prev.length - 1];
-              if (last === statusJson.message) return prev;
-              return [...prev, statusJson.message as string];
-            });
-          }
-
-          if (statusJson.done) {
-            // Generation complete
-            stopPolling();
-            addLog("✓ 3D model generated successfully!");
-            setResult({
-              glbUrl: (statusJson.glbUrl as string) ?? null,
-              objUrl: (statusJson.objUrl as string) ?? null,
-            });
-            setIsLoading(false);
-          } else if (statusJson.eventId) {
-            // Stage transitioned (preprocessing → generating) — update poll state
-            pollState = {
-              eventId: statusJson.eventId as string,
-              stage: statusJson.stage as "preprocessing" | "generating",
-              meshResolution: (statusJson.meshResolution as number) ?? pollState.meshResolution,
-            };
-          }
-          // else: same stage, still running — keep polling
-        } catch (err) {
-          stopPolling();
-          const msg = err instanceof Error ? err.message : String(err);
-          addLog(`✗ ${msg}`);
-          setError(msg);
-          setIsLoading(false);
         }
-      }, 3000);
+      }
     } catch (err) {
+      stopStreaming();
       const msg = err instanceof Error ? err.message : String(err);
       addLog(`✗ ${msg}`);
       setError(msg);
@@ -171,7 +171,7 @@ export default function Home() {
           </div>
           <div className="hidden sm:flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse-slow" />
-            <span className="font-mono text-xs text-slate-400">TripoSR · free tier</span>
+            <span className="font-mono text-xs text-slate-400">Hunyuan3D-2 · free tier</span>
           </div>
         </div>
       </header>

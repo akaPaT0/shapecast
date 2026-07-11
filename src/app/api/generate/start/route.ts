@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 30; // Only uploads happen here — must be fast
+export const maxDuration = 30; // Only uploads + submits happen here — must be fast
 
 const SPACE = "https://tencent-hunyuan3d-2.hf.space";
 
@@ -9,8 +9,8 @@ const SPACE = "https://tencent-hunyuan3d-2.hf.space";
  * POST /api/generate/start
  *
  * 1. Uploads the image to the Hunyuan3D-2 Space's /upload endpoint
- * 2. Prepares a stateless token encoding the uploaded path and parameters
- * 3. Returns the token as `eventId` to the client for the mock "preprocessing" stage
+ * 2. Submits the shape_generation job non-blocking -> gets event_id
+ * 3. Logs HUNYUAN3D_BACKEND_RUNNING and returns the eventId to the client
  */
 export async function POST(req: NextRequest) {
   try {
@@ -44,7 +44,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Response is an array of uploaded file paths, e.g. ["/tmp/gradio/abc/upload.png"]
     const uploadedPaths: string[] = await uploadRes.json();
     const uploadedPath = uploadedPaths[0];
     if (!uploadedPath) {
@@ -54,19 +53,52 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Step 2: Prepare stateless base64 token ────────────────────────────
-    const tokenPayload = {
-      path: uploadedPath,
-      removeBackground,
-    };
-    const eventId = Buffer.from(JSON.stringify(tokenPayload)).toString("base64");
+    // ── Step 2: Submit job non-blocking ──────────────────────────────────
+    const generateRes = await fetch(`${SPACE}/call/shape_generation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data: [
+          null,                                // Text Prompt (caption: str | null)
+          { path: uploadedPath },              // Image (FileData)
+          null,                                // Front (FileData | null)
+          null,                                // Back (FileData | null)
+          null,                                // Left (FileData | null)
+          null,                                // Right (FileData | null)
+          30,                                  // Inference Steps (steps: float)
+          5.0,                                 // Guidance Scale (guidance_scale: float)
+          1234,                                // Seed (seed: float)
+          meshResolution,                      // Octree Resolution (octree_resolution: float)
+          removeBackground,                    // Remove Background (check_box_rembg: bool)
+          8000,                                // Number of Chunks (num_chunks: float)
+          true                                 // Randomize seed (randomize_seed: bool)
+        ],
+      }),
+    });
 
-    // Return the token as eventId + the mesh resolution. The /status route
-    // will decode it and trigger the actual Hunyuan3D-2 generation on status poll.
+    if (!generateRes.ok) {
+      const text = await generateRes.text().catch(() => generateRes.statusText);
+      return NextResponse.json(
+        { error: `Hunyuan3D-2 shape generation submit failed (${generateRes.status}): ${text}` },
+        { status: 502 }
+      );
+    }
+
+    const { event_id: generateEventId } = await generateRes.json();
+    if (!generateEventId) {
+      return NextResponse.json(
+        { error: "Hunyuan3D-2 submit returned no event_id." },
+        { status: 502 }
+      );
+    }
+
+    // Server-side logs
+    console.log("HUNYUAN3D_BACKEND_RUNNING");
+    console.log("[ShapeCast] event_id created:", generateEventId);
+
     return NextResponse.json({
-      eventId,
-      stage: "preprocessing",
-      meshResolution,
+      eventId: generateEventId,
+      spaceUrl: SPACE,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
