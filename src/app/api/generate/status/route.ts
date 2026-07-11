@@ -147,118 +147,114 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ── Preprocessing Stage ────────────────────────────────────────────────
-    // In our Hunyuan3D-2 adapter, the preprocessing stage is a fast mock stage.
-    // We decode the base64 token from eventId and submit the Hunyuan3D-2 generation.
-    if (stage === "preprocessing") {
-      let tokenPayload: { path: string; removeBackground: boolean };
-      try {
-        const decoded = Buffer.from(eventId, "base64").toString("utf-8");
-        tokenPayload = JSON.parse(decoded);
-      } catch {
-        return NextResponse.json({ error: "Invalid event token." }, { status: 400 });
-      }
-
-      console.log("[ShapeCast] generation request started");
-      console.log("[ShapeCast] Space/API used: https://tencent-hunyuan3d-2.hf.space/call/shape_generation");
-
-      // Submit shape_generation non-blocking
-      const generateRes = await fetch(`${SPACE}/call/shape_generation`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          data: [
-            null,                                // Text Prompt (caption: str | null)
-            { path: tokenPayload.path },        // Image (FileData)
-            null,                                // Front (FileData | null)
-            null,                                // Back (FileData | null)
-            null,                                // Left (FileData | null)
-            null,                                // Right (FileData | null)
-            30,                                  // Inference Steps (steps: float)
-            5.0,                                 // Guidance Scale (guidance_scale: float)
-            1234,                                // Seed (seed: float)
-            meshResolution,                      // Octree Resolution (octree_resolution: float)
-            tokenPayload.removeBackground,       // Remove Background (check_box_rembg: bool)
-            8000,                                // Number of Chunks (num_chunks: float)
-            true                                 // Randomize seed (randomize_seed: bool)
-          ],
-        }),
-      });
-
-      if (!generateRes.ok) {
-        const text = await generateRes.text().catch(() => generateRes.statusText);
-        return NextResponse.json(
-          { error: `Hunyuan3D-2 shape generation submit failed (${generateRes.status}): ${text}` },
-          { status: 502 }
-        );
-      }
-
-      const { event_id: generateEventId } = await generateRes.json();
-      if (!generateEventId) {
-        return NextResponse.json(
-          { error: "Hunyuan3D-2 submit returned no event_id." },
-          { status: 502 }
-        );
-      }
-
-      return NextResponse.json({
-        done: false,
-        stage: "generating",
-        eventId: generateEventId,
-        meshResolution,
-        message: "Image preprocessed — shape generation queued…",
-      });
-    }
-
-    // ── Generating Stage ───────────────────────────────────────────────────
     // Prevent concurrent requests for the same eventId from trying to read the stream.
     if (activePolls.has(eventId)) {
       return NextResponse.json({
         done: false,
-        stage: "generating",
-        message: "Generating 3D mesh — this takes 30–120 s on the free tier…",
+        stage: "preprocessing",
+        message: "Generating 3D mesh — this takes 15–30 s on the GPU queue…",
       });
     }
 
     activePolls.add(eventId);
 
     try {
-      const result = await pollGradioSse("shape_generation", eventId);
+      if (stage === "preprocessing") {
+        let tokenPayload: { path: string; removeBackground: boolean };
+        try {
+          const decoded = Buffer.from(eventId, "base64").toString("utf-8");
+          tokenPayload = JSON.parse(decoded);
+        } catch {
+          return NextResponse.json({ error: "Invalid event token." }, { status: 400 });
+        }
 
-      if (result.status === "error") {
-        return NextResponse.json({ error: result.message }, { status: 502 });
-      }
+        console.log("[ShapeCast] generation request started");
+        console.log("[ShapeCast] Space/API used: https://tencent-hunyuan3d-2.hf.space/call/shape_generation");
 
-      if (result.status === "pending") {
+        // 1. Submit shape_generation non-blocking
+        const generateRes = await fetch(`${SPACE}/call/shape_generation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            data: [
+              null,                                // Text Prompt (caption: str | null)
+              { path: tokenPayload.path },        // Image (FileData)
+              null,                                // Front (FileData | null)
+              null,                                // Back (FileData | null)
+              null,                                // Left (FileData | null)
+              null,                                // Right (FileData | null)
+              30,                                  // Inference Steps (steps: float)
+              5.0,                                 // Guidance Scale (guidance_scale: float)
+              1234,                                // Seed (seed: float)
+              meshResolution,                      // Octree Resolution (octree_resolution: float)
+              tokenPayload.removeBackground,       // Remove Background (check_box_rembg: bool)
+              8000,                                // Number of Chunks (num_chunks: float)
+              true                                 // Randomize seed (randomize_seed: bool)
+            ],
+          }),
+        });
+
+        if (!generateRes.ok) {
+          const text = await generateRes.text().catch(() => generateRes.statusText);
+          return NextResponse.json(
+            { error: `Hunyuan3D-2 shape generation submit failed (${generateRes.status}): ${text}` },
+            { status: 502 }
+          );
+        }
+
+        const { event_id: generateEventId } = await generateRes.json();
+        if (!generateEventId) {
+          return NextResponse.json(
+            { error: "Hunyuan3D-2 submit returned no event_id." },
+            { status: 502 }
+          );
+        }
+
+        // 2. Immediately poll the SSE stream in the SAME request to maintain session
+        const result = await pollGradioSse("shape_generation", generateEventId);
+
+        if (result.status === "error") {
+          return NextResponse.json({ error: result.message }, { status: 502 });
+        }
+
+        if (result.status === "pending") {
+          return NextResponse.json(
+            { error: "Hunyuan3D-2 generation timed out. Try again." },
+            { status: 502 }
+          );
+        }
+
+        // complete
+        // result.data[0] = GLB file object (white_mesh.glb)
+        const glbUrl = extractUrl(result.data[0]);
+
+        if (!glbUrl) {
+          return NextResponse.json(
+            {
+              error: "Hunyuan3D-2 generation returned no files. The Space may be at capacity.",
+            },
+            { status: 502 }
+          );
+        }
+
+        // Logging required markers before returning
+        console.log("HUNYUAN3D_BACKEND_RUNNING");
+        console.log("[ShapeCast] returned file URL:", JSON.stringify(result.data[0]));
+        console.log("[ShapeCast] final URL sent to frontend:", glbUrl);
+
         return NextResponse.json({
-          done: false,
-          stage: "generating",
-          message: "Generating 3D mesh — this takes 30–120 s on the free tier…",
+          done: true,
+          glbUrl,
+          objUrl: null, // Hunyuan3D-2 shape_generation returns glb only by default
         });
       }
 
-      // complete
-      // result.data[0] = GLB file object (white_mesh.glb)
-      const glbUrl = extractUrl(result.data[0]);
-
-      if (!glbUrl) {
-        return NextResponse.json(
-          {
-            error: "Hunyuan3D-2 generation returned no files. The Space may be at capacity.",
-          },
-          { status: 502 }
-        );
-      }
-
-      // Logging required markers before returning
-      console.log("HUNYUAN3D_BACKEND_RUNNING");
-      console.log("[ShapeCast] returned file URL:", JSON.stringify(result.data[0]));
-      console.log("[ShapeCast] final URL sent to frontend:", glbUrl);
-
+      // Fallback for generating stage (should not be reached under this new synchronous flow,
+      // but kept for compatibility in case the client sends it)
       return NextResponse.json({
-        done: true,
-        glbUrl,
-        objUrl: null, // Hunyuan3D-2 shape_generation returns glb only by default
+        done: false,
+        stage: "generating",
+        message: "Generating 3D mesh…",
       });
     } finally {
       activePolls.delete(eventId);
