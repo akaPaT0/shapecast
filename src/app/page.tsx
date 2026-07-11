@@ -21,18 +21,18 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GenerateResult | null>(null);
 
-  const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, msg]);
 
   const stopStreaming = () => {
-    if (readerRef.current) {
+    if (eventSourceRef.current) {
       try {
-        readerRef.current.cancel();
+        eventSourceRef.current.close();
       } catch (e) {
-        console.error("Error cancelling reader:", e);
+        console.error("Error closing EventSource:", e);
       }
-      readerRef.current = null;
+      eventSourceRef.current = null;
     }
   };
 
@@ -114,67 +114,72 @@ export default function Home() {
 
       addLog("✓ Job queued — connecting to Gradio event stream…");
 
-      // ── Step 3: Connect to Gradio SSE stream directly ────────────────
+      // ── Step 3: Connect to Gradio SSE stream directly via EventSource ──
       console.log("[ShapeCast] SSE connected to space:", SPACE);
-      const sseRes = await fetch(`${SPACE}/call/shape_generation/${eventId}?session_hash=${sessionHash}`);
-      if (!sseRes.ok || !sseRes.body) {
-        throw new Error(`Failed to establish event stream (status ${sseRes.status})`);
-      }
+      
+      const esUrl = `${SPACE}/call/shape_generation/${eventId}?session_hash=${sessionHash}`;
+      const es = new EventSource(esUrl);
+      eventSourceRef.current = es;
 
-      const reader = sseRes.body.getReader();
-      readerRef.current = reader;
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let lastEvent = "";
+      es.addEventListener("generating", () => {
+        setLogs((prev) => {
+          const last = prev[prev.length - 1];
+          const generatingMsg = "Generating 3D mesh — this takes 15–30 s on the GPU queue…";
+          if (last === generatingMsg) return prev;
+          return [...prev, generatingMsg];
+        });
+      });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      es.addEventListener("complete", (event) => {
+        stopStreaming();
+        console.log("[ShapeCast] generation completed");
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
+        try {
+          const parsed = JSON.parse(event.data);
+          const data = Array.isArray(parsed) ? parsed : parsed?.data ?? [];
+          const fileObj = data[0]?.value || data[0];
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("event:")) {
-            lastEvent = trimmed.replace("event:", "").trim();
-          } else if (trimmed.startsWith("data:")) {
-            const raw = trimmed.replace("data:", "").trim();
+          if (!fileObj || typeof fileObj.path !== "string") {
+            throw new Error("Generation returned no valid 3D model path.");
+          }
 
-            if (lastEvent === "generating") {
-              addLog("Generating 3D mesh — this takes 15–30 s on the GPU queue…");
-            } else if (lastEvent === "complete") {
-              stopStreaming();
-              console.log("[ShapeCast] generation completed");
+          const cleanPath = fileObj.path.startsWith("/") ? fileObj.path : `/${fileObj.path}`;
+          const glbUrl = `${SPACE}/file=${cleanPath}`;
 
-              const parsed = JSON.parse(raw);
-              const data = Array.isArray(parsed) ? parsed : parsed?.data ?? [];
-              const fileObj = data[0]?.value || data[0];
+          console.log("[ShapeCast] final GLB URL:", glbUrl);
+          addLog("✓ 3D model generated successfully!");
 
-              if (!fileObj || typeof fileObj.path !== "string") {
-                throw new Error("Generation returned no valid 3D model path.");
-              }
+          setResult({
+            glbUrl,
+            objUrl: null,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setError(msg);
+          addLog(`✗ Error parsing output: ${msg}`);
+        } finally {
+          setIsLoading(false);
+        }
+      });
 
-              const cleanPath = fileObj.path.startsWith("/") ? fileObj.path : `/${fileObj.path}`;
-              const glbUrl = `${SPACE}/file=${cleanPath}`;
-
-              console.log("[ShapeCast] final GLB URL:", glbUrl);
-              addLog("✓ 3D model generated successfully!");
-
-              setResult({
-                glbUrl,
-                objUrl: null,
-              });
-              setIsLoading(false);
-              return;
-            } else if (lastEvent === "error") {
-              stopStreaming();
-              throw new Error(`Gradio Space error: ${raw}`);
-            }
+      es.addEventListener("error", (event: Event) => {
+        stopStreaming();
+        // EventSource error events don't carry data properties in standard specs,
+        // but if Gradio emits a custom error event it will be handled.
+        let msg = "SSE stream connection lost.";
+        const customEvent = event as MessageEvent;
+        if (customEvent.data) {
+          try {
+            msg = JSON.parse(customEvent.data);
+          } catch {
+            msg = String(customEvent.data);
           }
         }
-      }
+        addLog(`✗ Gradio Space error: ${msg}`);
+        setError(msg);
+        setIsLoading(false);
+      });
+
     } catch (err) {
       stopStreaming();
       const msg = err instanceof Error ? err.message : String(err);
@@ -183,6 +188,7 @@ export default function Home() {
       setIsLoading(false);
     }
   };
+
 
   const canSubmit = !!imageFile && !isLoading;
 
