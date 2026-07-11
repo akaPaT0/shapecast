@@ -38,16 +38,16 @@ export async function POST(req: NextRequest) {
       10
     );
 
-    // Convert the uploaded File to a Blob that @gradio/client can handle
-    const arrayBuffer = await imageFile.arrayBuffer();
-    const imageBlob = new Blob([arrayBuffer], { type: imageFile.type });
+    // File already extends Blob — pass it directly so the filename is preserved.
+    // Re-wrapping via arrayBuffer() + new Blob() would drop the filename, which
+    // some Gradio upload paths check.
 
     // ── Connect to the free TripoSR Gradio Space ──────────────────────────
     const client = await Client.connect("stabilityai/TripoSR");
 
     // ── Step 1: preprocess (background removal + crop) ────────────────────
     const preprocessResult = await client.predict("/preprocess", [
-      imageBlob,
+      imageFile,
       removeBackground,
       foregroundRatio,
     ]);
