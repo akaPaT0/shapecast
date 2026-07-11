@@ -46,47 +46,77 @@ export default function Home() {
     setLogs([]);
     stopStreaming();
 
+    const SPACE = "https://tencent-hunyuan3d-2.hf.space";
+
     try {
-      // ── Step 1: Start the job ─────────────────────────────────────────
-      addLog("Uploading image and submitting job to Hunyuan3D-2…");
+      // ── Step 1: Upload image directly from the browser ─────────────────
+      addLog("Uploading image directly to Hugging Face space…");
 
-      const sessionHash = Math.random().toString(36).substring(2, 12);
+      const uploadForm = new FormData();
+      uploadForm.append("files", imageFile, imageFile.name || "upload.png");
 
-      const fd = new FormData();
-      fd.append("image", imageFile);
-      fd.append("removeBackground", String(removeBackground));
-      fd.append("foregroundRatio", String(foregroundRatio));
-      fd.append("meshResolution", String(meshResolution));
-      fd.append("sessionHash", sessionHash);
-
-      const startRes = await fetch("/api/generate/start", {
+      const uploadRes = await fetch(`${SPACE}/upload`, {
         method: "POST",
-        body: fd,
+        body: uploadForm,
       });
 
-      let startJson: Record<string, unknown>;
-      try {
-        startJson = await startRes.json();
-      } catch {
-        const text = await startRes.text().catch(() => startRes.statusText);
-        throw new Error(`Lost connection to server: ${text.slice(0, 200)}`);
+      if (!uploadRes.ok) {
+        const text = await uploadRes.text().catch(() => uploadRes.statusText);
+        throw new Error(`Image upload failed: ${text.slice(0, 200)}`);
       }
 
-      if (!startRes.ok) {
-        throw new Error((startJson.error as string) ?? "Failed to start generation.");
+      const uploadedPaths: string[] = await uploadRes.json();
+      const uploadedPath = uploadedPaths[0];
+      if (!uploadedPath) {
+        throw new Error("Gradio upload returned no file path.");
       }
 
-      const eventId = startJson.eventId as string;
-      const spaceUrl = startJson.spaceUrl as string;
+      addLog("✓ Image uploaded successfully — submitting job…");
+
+      // ── Step 2: Submit shape_generation directly from the browser ──────
+      const sessionHash = Math.random().toString(36).substring(2, 12);
+
+      const generateRes = await fetch(`${SPACE}/call/shape_generation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          data: [
+            null,                                // Text Prompt (caption: str | null)
+            { path: uploadedPath },              // Image (FileData)
+            null,                                // Front (FileData | null)
+            null,                                // Back (FileData | null)
+            null,                                // Left (FileData | null)
+            null,                                // Right (FileData | null)
+            30,                                  // Inference Steps (steps: float)
+            5.0,                                 // Guidance Scale (guidance_scale: float)
+            1234,                                // Seed (seed: float)
+            meshResolution,                      // Octree Resolution (octree_resolution: float)
+            removeBackground,                    // Remove Background (check_box_rembg: bool)
+            8000,                                // Number of Chunks (num_chunks: float)
+            true                                 // Randomize seed (randomize_seed: bool)
+          ],
+          session_hash: sessionHash,
+        }),
+      });
+
+      if (!generateRes.ok) {
+        const text = await generateRes.text().catch(() => generateRes.statusText);
+        throw new Error(`Hunyuan3D-2 submit failed: ${text.slice(0, 200)}`);
+      }
+
+      const { event_id: eventId } = await generateRes.json();
+      if (!eventId) {
+        throw new Error("Hunyuan3D-2 submit returned no event_id.");
+      }
 
       console.log("HUNYUAN3D_BACKEND_RUNNING");
       console.log("[ShapeCast] event_id created:", eventId);
 
       addLog("✓ Job queued — connecting to Gradio event stream…");
 
-      // ── Step 2: Connect to Gradio SSE stream directly ────────────────
-      console.log("[ShapeCast] SSE connected to space:", spaceUrl);
-      const sseRes = await fetch(`${spaceUrl}/call/shape_generation/${eventId}?session_hash=${sessionHash}`);
+      // ── Step 3: Connect to Gradio SSE stream directly ────────────────
+      console.log("[ShapeCast] SSE connected to space:", SPACE);
+      const sseRes = await fetch(`${SPACE}/call/shape_generation/${eventId}?session_hash=${sessionHash}`);
       if (!sseRes.ok || !sseRes.body) {
         throw new Error(`Failed to establish event stream (status ${sseRes.status})`);
       }
@@ -127,7 +157,7 @@ export default function Home() {
               }
 
               const cleanPath = fileObj.path.startsWith("/") ? fileObj.path : `/${fileObj.path}`;
-              const glbUrl = `${spaceUrl}/file=${cleanPath}`;
+              const glbUrl = `${SPACE}/file=${cleanPath}`;
 
               console.log("[ShapeCast] final GLB URL:", glbUrl);
               addLog("✓ 3D model generated successfully!");
