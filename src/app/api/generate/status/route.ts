@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 20; // Just a quick status check — must be fast
+export const maxDuration = 30; // Quick checks and transitions happen here
 
-const SPACE = "https://stabilityai-triposr.hf.space";
+const SPACE = "https://tencent-hunyuan3d-2.hf.space";
 
 /**
  * Reads ONE SSE event from the Gradio event stream without keeping the
@@ -36,8 +36,6 @@ async function pollGradioSse(
     if (!res.ok || !res.body) {
       clearTimeout(timer);
       const text = await res.text().catch(() => res.statusText);
-      // Surface non-JSON/non-200 responses as a clear error instead of
-      // letting the caller try to parse a crash page as JSON.
       return {
         status: "error",
         message: `Lost connection to generation job (HTTP ${res.status}): ${text.slice(0, 200)}`,
@@ -110,20 +108,15 @@ async function pollGradioSse(
 /**
  * Extract a usable URL string from a Gradio FileData object.
  *
- * The Gradio /info schema shows url is typed as string|null with default null,
- * so we must check typeof AND non-empty before trusting it.
- * The path field starts with "/tmp/gradio/..." (already has leading slash),
- * so we use "/file=" not "/file=/".
+ * We always construct directly from the path using the /file= endpoint
+ * because the returned .url contains /call/shape/file= which 404s.
  */
 function extractUrl(value: unknown): string | null {
   if (!value) return null;
   if (typeof value === "object") {
     const v = value as Record<string, unknown>;
-    // Hugging Face's returned .url contains /ca/ which 404s.
-    // We construct directly from the path using the /file= endpoint.
     if (typeof v.path === "string" && v.path.length > 0) {
       const cleanPath = v.path.startsWith("/") ? v.path : `/${v.path}`;
-      console.log("EXTRACT_URL_V2_RUNNING - Path:", cleanPath);
       return `${SPACE}/file=${cleanPath}`;
     }
   }
@@ -133,17 +126,7 @@ function extractUrl(value: unknown): string | null {
 /**
  * GET /api/generate/status?eventId=...&stage=...&meshResolution=...
  *
- * Stateless poll endpoint. The client sends back whatever the previous
- * /start or /status response returned:
- *   - eventId      — the Gradio event_id for the current stage
- *   - stage        — "preprocessing" | "generating"
- *   - meshResolution — needed to kick off /generate after preprocessing
- *
- * Responses:
- *   { done: false, stage: "...", message: "..." }       — still running
- *   { done: false, stage: "generating", eventId: "..." } — just transitioned
- *   { done: true, glbUrl: "...", objUrl: "..." }         — finished
- *   { error: "..." }                                     — something went wrong
+ * Stateless poll endpoint.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -159,40 +142,40 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const apiName = stage === "preprocessing" ? "preprocess" : "generate";
-    const result = await pollGradioSse(apiName, eventId);
-
-    if (result.status === "error") {
-      return NextResponse.json({ error: result.message }, { status: 502 });
-    }
-
-    if (result.status === "pending") {
-      const messages: Record<string, string> = {
-        preprocessing: "Preprocessing image — removing background…",
-        generating: "Generating 3D mesh — this takes 30–120 s on the free tier…",
-      };
-      return NextResponse.json({ done: false, stage, message: messages[stage] });
-    }
-
-    // ── complete ──────────────────────────────────────────────────────────
+    // ── Preprocessing Stage ────────────────────────────────────────────────
+    // In our Hunyuan3D-2 adapter, the preprocessing stage is a fast mock stage.
+    // We decode the base64 token from eventId and submit the Hunyuan3D-2 generation.
     if (stage === "preprocessing") {
-      // data[0] = processed image (FileData object)
-      const processedImage = result.data[0];
-      if (!processedImage) {
-        return NextResponse.json(
-          { error: "Preprocessing returned no image. The Space may be busy — please retry." },
-          { status: 502 }
-        );
+      let tokenPayload: { path: string; removeBackground: boolean };
+      try {
+        const decoded = Buffer.from(eventId, "base64").toString("utf-8");
+        tokenPayload = JSON.parse(decoded);
+      } catch {
+        return NextResponse.json({ error: "Invalid event token." }, { status: 400 });
       }
 
-      // Submit /generate non-blocking with the processed image FileData
-      const generateRes = await fetch(`${SPACE}/call/generate`, {
+      console.log("[ShapeCast] generation request started");
+      console.log("[ShapeCast] Space/API used: https://tencent-hunyuan3d-2.hf.space/call/shape_generation");
+
+      // Submit shape_generation non-blocking
+      const generateRes = await fetch(`${SPACE}/call/shape_generation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           data: [
-            processedImage,    // Processed Image (FileData, passed through as-is)
-            meshResolution,    // Marching Cubes Resolution (float)
+            null,                                // Text Prompt (caption: str | null)
+            { path: tokenPayload.path },        // Image (FileData)
+            null,                                // Front (FileData | null)
+            null,                                // Back (FileData | null)
+            null,                                // Left (FileData | null)
+            null,                                // Right (FileData | null)
+            30,                                  // Inference Steps (steps: float)
+            5.0,                                 // Guidance Scale (guidance_scale: float)
+            1234,                                // Seed (seed: float)
+            meshResolution,                      // Octree Resolution (octree_resolution: float)
+            tokenPayload.removeBackground,       // Remove Background (check_box_rembg: bool)
+            8000,                                // Number of Chunks (num_chunks: float)
+            true                                 // Randomize seed (randomize_seed: bool)
           ],
         }),
       });
@@ -200,7 +183,7 @@ export async function GET(req: NextRequest) {
       if (!generateRes.ok) {
         const text = await generateRes.text().catch(() => generateRes.statusText);
         return NextResponse.json(
-          { error: `Generate submit failed (${generateRes.status}): ${text}` },
+          { error: `Hunyuan3D-2 shape generation submit failed (${generateRes.status}): ${text}` },
           { status: 502 }
         );
       }
@@ -208,7 +191,7 @@ export async function GET(req: NextRequest) {
       const { event_id: generateEventId } = await generateRes.json();
       if (!generateEventId) {
         return NextResponse.json(
-          { error: "Generate submit returned no event_id." },
+          { error: "Hunyuan3D-2 submit returned no event_id." },
           { status: 502 }
         );
       }
@@ -218,40 +201,48 @@ export async function GET(req: NextRequest) {
         stage: "generating",
         eventId: generateEventId,
         meshResolution,
-        message: "Preprocessing complete — 3D generation queued…",
+        message: "Image preprocessed — shape generation queued…",
       });
     }
 
-    // stage === "generating"
-    // data[0] = OBJ (FileData), data[1] = GLB (FileData)
-    // Log the raw objects BEFORE extraction so we can see exactly what
-    // Hugging Face returns — url field, path field, and any other keys.
-    console.log(
-      "[ShapeCast] raw /generate output — data[0] (OBJ):",
-      JSON.stringify(result.data[0], null, 2)
-    );
-    console.log(
-      "[ShapeCast] raw /generate output — data[1] (GLB):",
-      JSON.stringify(result.data[1], null, 2)
-    );
+    // ── Generating Stage ───────────────────────────────────────────────────
+    const result = await pollGradioSse("shape_generation", eventId);
 
-    const objUrl = extractUrl(result.data[0]);
-    const glbUrl = extractUrl(result.data[1]);
+    if (result.status === "error") {
+      return NextResponse.json({ error: result.message }, { status: 502 });
+    }
 
-    console.log("[ShapeCast] extracted objUrl:", objUrl);
-    console.log("[ShapeCast] extracted glbUrl:", glbUrl);
+    if (result.status === "pending") {
+      return NextResponse.json({
+        done: false,
+        stage: "generating",
+        message: "Generating 3D mesh — this takes 30–120 s on the free tier…",
+      });
+    }
 
-    if (!glbUrl && !objUrl) {
+    // complete
+    // result.data[0] = GLB file object (white_mesh.glb)
+    const glbUrl = extractUrl(result.data[0]);
+
+    if (!glbUrl) {
       return NextResponse.json(
         {
-          error:
-            "Generation returned no files. The free Space may be at capacity — wait a minute and retry.",
+          error: "Hunyuan3D-2 generation returned no files. The Space may be at capacity.",
         },
         { status: 502 }
       );
     }
 
-    return NextResponse.json({ done: true, glbUrl, objUrl });
+    // Logging required markers before returning
+    console.log("HUNYUAN3D_BACKEND_RUNNING");
+    console.log("[ShapeCast] returned file URL:", JSON.stringify(result.data[0]));
+    console.log("[ShapeCast] final URL sent to frontend:", glbUrl);
+
+    return NextResponse.json({
+      done: true,
+      glbUrl,
+      objUrl: null, // Hunyuan3D-2 shape_generation returns glb only by default
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[ShapeCast /api/generate/status]", message);
