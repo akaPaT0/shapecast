@@ -50,11 +50,14 @@ export default function Home() {
       // ── Step 1: Start the job ─────────────────────────────────────────
       addLog("Uploading image and submitting job to Hunyuan3D-2…");
 
+      const sessionHash = Math.random().toString(36).substring(2, 12);
+
       const fd = new FormData();
       fd.append("image", imageFile);
       fd.append("removeBackground", String(removeBackground));
       fd.append("foregroundRatio", String(foregroundRatio));
       fd.append("meshResolution", String(meshResolution));
+      fd.append("sessionHash", sessionHash);
 
       const startRes = await fetch("/api/generate/start", {
         method: "POST",
@@ -83,7 +86,7 @@ export default function Home() {
 
       // ── Step 2: Connect to Gradio SSE stream directly ────────────────
       console.log("[ShapeCast] SSE connected to space:", spaceUrl);
-      const sseRes = await fetch(`${spaceUrl}/call/shape_generation/${eventId}`);
+      const sseRes = await fetch(`${spaceUrl}/call/shape_generation/${eventId}?session_hash=${sessionHash}`);
       if (!sseRes.ok || !sseRes.body) {
         throw new Error(`Failed to establish event stream (status ${sseRes.status})`);
       }

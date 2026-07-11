@@ -26,6 +26,7 @@ export async function POST(req: NextRequest) {
       (formData.get("meshResolution") as string) ?? "256",
       10
     );
+    const sessionHash = formData.get("sessionHash") as string | null;
 
     // ── Step 1: Upload the image to the Hunyuan3D-2 Gradio Space ─────────
     const uploadForm = new FormData();
@@ -73,6 +74,7 @@ export async function POST(req: NextRequest) {
           8000,                                // Number of Chunks (num_chunks: float)
           true                                 // Randomize seed (randomize_seed: bool)
         ],
+        session_hash: sessionHash || undefined,
       }),
     });
 
