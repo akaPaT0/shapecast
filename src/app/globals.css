@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap");
+
+:root {
+  --font-space-grotesk: "Space Grotesk", sans-serif;
+  --font-ibm-plex-mono: "IBM Plex Mono", monospace;
+  --font-inter: "Inter", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #101826;
+  color: #e2eaf4;
+  font-family: var(--font-inter);
+}
+
+/* Blueprint grid overlay */
+.blueprint-bg {
+  background-color: #101826;
+  background-image: linear-gradient(rgba(127, 231, 224, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(127, 231, 224, 0.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: center center;
+}
+
+/* Cyan glow for accents */
+.cyan-glow {
+  box-shadow: 0 0 20px rgba(127, 231, 224, 0.2), 0 0 40px rgba(127, 231, 224, 0.08);
+}
+
+.cyan-text-glow {
+  text-shadow: 0 0 20px rgba(127, 231, 224, 0.5);
+}
+
+/* Range input styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-track {
+  background: #1e2d42;
+  height: 4px;
+  border-radius: 2px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 50%;
+  background: #7fe7e0;
+  border: 2px solid #101826;
+  margin-top: -6px;
+  box-shadow: 0 0 6px rgba(127, 231, 224, 0.5);
+}
+
+input[type="range"]::-moz-range-track {
+  background: #1e2d42;
+  height: 4px;
+  border-radius: 2px;
+}
+
+input[type="range"]::-moz-range-thumb {
+  height: 16px;
+  width: 16px;
+  border-radius: 50%;
+  background: #7fe7e0;
+  border: 2px solid #101826;
+  box-shadow: 0 0 6px rgba(127, 231, 224, 0.5);
+}
+
+/* Status log scrollbar */
+.log-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.log-scroll::-webkit-scrollbar-track {
+  background: #0d1520;
+}
+.log-scroll::-webkit-scrollbar-thumb {
+  background: #1e2d42;
+  border-radius: 2px;
+}
+
+/* model-viewer fills its container */
+model-viewer {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+.cursor-blink {
+  animation: cursor-blink 1.1s step-end infinite;
+}
