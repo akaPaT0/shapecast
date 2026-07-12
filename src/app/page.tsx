@@ -65,21 +65,48 @@ export default function Home() {
     setLogs([]);
     stopStreaming();
 
+    const SPACE = "https://tencent-hunyuan3d-2.hf.space";
+
     try {
       addLog("Connecting to Hunyuan3D-2 Space…");
       
       // Dynamic import to prevent SSR "window is not defined" build errors
-      const { Client, handle_file } = await import("@gradio/client");
+      const { Client } = await import("@gradio/client");
       const app = await Client.connect("tencent/Hunyuan3D-2");
 
       console.log("HUNYUAN3D_BACKEND_RUNNING");
-      addLog("✓ Connected! Submitting job and uploading image…");
+      addLog("✓ Connected! Uploading image to Hugging Face…");
 
-      // Call app.predict directly. The SDK handles uploads, job scheduling, 
-      // polling, and outputs internally, resolving directly to the output object.
+      // ── Step 1: Upload image directly to preserve extension ───────────
+      const uploadForm = new FormData();
+      uploadForm.append("files", imageFile, imageFile.name || "upload.png");
+
+      const uploadRes = await fetch(`${SPACE}/upload`, {
+        method: "POST",
+        body: uploadForm,
+      });
+
+      if (!uploadRes.ok) {
+        const text = await uploadRes.text().catch(() => uploadRes.statusText);
+        throw new Error(`Image upload failed: ${text.slice(0, 200)}`);
+      }
+
+      const uploadedPaths: string[] = await uploadRes.json();
+      const uploadedPath = uploadedPaths[0];
+      if (!uploadedPath) {
+        throw new Error("Gradio upload returned no file path.");
+      }
+
+      addLog("✓ Image uploaded successfully — submitting job…");
+
+      // ── Step 2: Call app.predict passing the file path descriptor ──────
       const resultData = (await app.predict("/shape_generation", [
         null,                                // Text Prompt (caption: str | null)
-        handle_file(imageFile),              // Image (FileData) - Wrapped using SDK helper
+        {
+          path: uploadedPath,
+          orig_name: imageFile.name || "upload.png",
+          meta: { _type: "gradio.FileData" }
+        },                                   // Image descriptor
         null,                                // Front (FileData | null)
         null,                                // Back (FileData | null)
         null,                                // Left (FileData | null)
