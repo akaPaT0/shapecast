@@ -55,6 +55,42 @@ export default function Home() {
     }
   };
 
+  const convertToPng = (file: File): Promise<File> => {
+    return new Promise((resolve) => {
+      if (file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) {
+        resolve(file);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(file);
+            return;
+          }
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob((blob) => {
+            if (blob) {
+              const newName = file.name.replace(/\.[^/.]+$/, "") + ".png";
+              resolve(new File([blob], newName, { type: "image/png" }));
+            } else {
+              resolve(file);
+            }
+          }, "image/png");
+        };
+        img.onerror = () => resolve(file);
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!imageFile) return;
@@ -68,6 +104,9 @@ export default function Home() {
     const SPACE = "https://tencent-hunyuan3d-2.hf.space";
 
     try {
+      addLog("Preparing and converting image to standard PNG…");
+      const processedFile = await convertToPng(imageFile);
+
       addLog("Connecting to Hunyuan3D-2 Space…");
       
       // Dynamic import to prevent SSR "window is not defined" build errors
@@ -79,7 +118,7 @@ export default function Home() {
 
       // ── Step 1: Upload image directly to preserve extension ───────────
       const uploadForm = new FormData();
-      uploadForm.append("files", imageFile, imageFile.name || "upload.png");
+      uploadForm.append("files", processedFile, processedFile.name || "upload.png");
 
       const uploadRes = await fetch(`${SPACE}/upload`, {
         method: "POST",
@@ -104,7 +143,7 @@ export default function Home() {
         null,                                // Text Prompt (caption: str | null)
         {
           path: uploadedPath,
-          orig_name: imageFile.name || "upload.png",
+          orig_name: processedFile.name || "upload.png",
           meta: { _type: "gradio.FileData" }
         },                                   // Image descriptor
         null,                                // Front (FileData | null)
