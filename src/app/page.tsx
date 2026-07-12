@@ -94,46 +94,49 @@ export default function Home() {
       // Keep reference to job if we need to cancel it later
       (window as unknown as CustomWindow).currentGradioJob = job;
 
-      for await (const msg of job as AsyncIterable<unknown>) {
-        const message = msg as Record<string, unknown>;
-        if (message.type === "status") {
-          const status = message.status as Record<string, unknown> | null;
-          console.log("[ShapeCast] Gradio status update:", status);
-          if (status && status.stage === "generating") {
-            setLogs((prev) => {
-              const last = prev[prev.length - 1];
-              const generatingMsg = "Generating 3D mesh — this takes 15–30 s on the GPU queue…";
-              if (last === generatingMsg) return prev;
-              return [...prev, generatingMsg];
-            });
+      // Run status listener in the background so it doesn't block result retrieval
+      (async () => {
+        try {
+          for await (const msg of job as AsyncIterable<unknown>) {
+            const message = msg as Record<string, unknown>;
+            if (message.type === "status") {
+              const status = message.status as Record<string, unknown> | null;
+              console.log("[ShapeCast] Gradio status update:", status);
+              if (status && status.stage === "generating") {
+                setLogs((prev) => {
+                  const last = prev[prev.length - 1];
+                  const generatingMsg = "Generating 3D mesh — this takes 15–30 s on the GPU queue…";
+                  if (last === generatingMsg) return prev;
+                  return [...prev, generatingMsg];
+                });
+              }
+            }
           }
-        } else if (message.type === "data") {
-          console.log("[ShapeCast] generation completed data:", message.data);
-          const data = message.data as Record<string, unknown>[];
-          const fileObj = data[0];
-
-          if (!fileObj || typeof fileObj.url !== "string") {
-            throw new Error("Generation returned no valid 3D model URL.");
-          }
-
-          const glbUrl = fileObj.url;
-          console.log("[ShapeCast] final GLB URL:", glbUrl);
-          addLog("✓ 3D model generated successfully!");
-
-          setResult({
-            glbUrl,
-            objUrl: null,
-          });
-          setIsLoading(false);
-          return;
-        } else if (message.type === "error") {
-          const errMsg = typeof message.message === "string" ? message.message : "Gradio job failed.";
-          throw new Error(errMsg);
+        } catch (e) {
+          console.warn("[ShapeCast] Status loop warning:", e);
         }
+      })();
+
+      // Await the final job completion to retrieve the 3D model URL
+      const resultData = (await job) as unknown as Record<string, unknown>;
+      console.log("[ShapeCast] Job completed result:", resultData);
+
+      const data = resultData.data as Record<string, unknown>[];
+      const fileObj = data[0];
+
+      if (!fileObj || typeof fileObj.url !== "string") {
+        throw new Error("Generation returned no valid 3D model URL.");
       }
 
-      // If loop completes without returning data and no error thrown
-      throw new Error("Generation finished without returning any 3D model.");
+      const glbUrl = fileObj.url;
+      console.log("[ShapeCast] final GLB URL:", glbUrl);
+      addLog("✓ 3D model generated successfully!");
+
+      setResult({
+        glbUrl,
+        objUrl: null,
+      });
+      setIsLoading(false);
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
