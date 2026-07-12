@@ -75,7 +75,11 @@ export default function Home() {
       console.log("HUNYUAN3D_BACKEND_RUNNING");
       addLog("✓ Connected! Submitting job and uploading image…");
 
-      const job = app.submit("/shape_generation", [
+
+
+      // Call app.predict directly. The SDK handles uploads, job scheduling, 
+      // polling, and outputs internally, resolving directly to the output object.
+      const resultData = (await app.predict("/shape_generation", [
         null,                                // Text Prompt (caption: str | null)
         imageFile,                           // Image (FileData)
         null,                                // Front (FileData | null)
@@ -89,36 +93,8 @@ export default function Home() {
         removeBackground,                    // Remove Background (check_box_rembg: bool)
         8000,                                // Number of Chunks (num_chunks: float)
         true                                 // Randomize seed (randomize_seed: bool)
-      ]);
+      ])) as unknown as Record<string, unknown>;
 
-      // Keep reference to job if we need to cancel it later
-      (window as unknown as CustomWindow).currentGradioJob = job;
-
-      // Run status listener in the background so it doesn't block result retrieval
-      (async () => {
-        try {
-          for await (const msg of job as AsyncIterable<unknown>) {
-            const message = msg as Record<string, unknown>;
-            if (message.type === "status") {
-              const status = message.status as Record<string, unknown> | null;
-              console.log("[ShapeCast] Gradio status update:", status);
-              if (status && status.stage === "generating") {
-                setLogs((prev) => {
-                  const last = prev[prev.length - 1];
-                  const generatingMsg = "Generating 3D mesh — this takes 15–30 s on the GPU queue…";
-                  if (last === generatingMsg) return prev;
-                  return [...prev, generatingMsg];
-                });
-              }
-            }
-          }
-        } catch (e) {
-          console.warn("[ShapeCast] Status loop warning:", e);
-        }
-      })();
-
-      // Await the final job completion to retrieve the 3D model URL
-      const resultData = (await job) as unknown as Record<string, unknown>;
       console.log("[ShapeCast] Job completed result:", resultData);
 
       const data = resultData.data as Record<string, unknown>[];
