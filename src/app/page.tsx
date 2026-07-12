@@ -69,19 +69,17 @@ export default function Home() {
       addLog("Connecting to Hunyuan3D-2 Space…");
       
       // Dynamic import to prevent SSR "window is not defined" build errors
-      const { Client } = await import("@gradio/client");
+      const { Client, handle_file } = await import("@gradio/client");
       const app = await Client.connect("tencent/Hunyuan3D-2");
 
       console.log("HUNYUAN3D_BACKEND_RUNNING");
       addLog("✓ Connected! Submitting job and uploading image…");
 
-
-
       // Call app.predict directly. The SDK handles uploads, job scheduling, 
       // polling, and outputs internally, resolving directly to the output object.
       const resultData = (await app.predict("/shape_generation", [
         null,                                // Text Prompt (caption: str | null)
-        imageFile,                           // Image (FileData)
+        handle_file(imageFile),              // Image (FileData) - Wrapped using SDK helper
         null,                                // Front (FileData | null)
         null,                                // Back (FileData | null)
         null,                                // Left (FileData | null)
@@ -103,6 +101,7 @@ export default function Home() {
       }
 
       console.log("[ShapeCast] Resolved fileObj:", fileObj);
+      addLog("Debug model payload: " + JSON.stringify(fileObj));
 
       const pathVal = fileObj.url || fileObj.path;
       if (typeof pathVal !== "string") {
@@ -127,10 +126,21 @@ export default function Home() {
       setIsLoading(false);
 
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[ShapeCast] Submit error:", err);
+      let msg = "";
+      if (err instanceof Error) {
+        msg = err.message;
+      } else if (typeof err === "object" && err !== null) {
+        try {
+          msg = JSON.stringify(err);
+        } catch {
+          msg = String(err);
+        }
+      } else {
+        msg = String(err);
+      }
       addLog(`✗ ${msg}`);
       setError(msg);
-      setIsLoading(false);
     }
   };
 
