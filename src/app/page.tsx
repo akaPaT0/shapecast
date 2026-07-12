@@ -95,16 +95,28 @@ export default function Home() {
         true                                 // Randomize seed (randomize_seed: bool)
       ])) as unknown as Record<string, unknown>;
 
-      console.log("[ShapeCast] Job completed result:", resultData);
-
       const data = resultData.data as Record<string, unknown>[];
-      const fileObj = data[0];
+      const fileObj = data[0] as Record<string, unknown> | undefined;
 
-      if (!fileObj || typeof fileObj.url !== "string") {
-        throw new Error("Generation returned no valid 3D model URL.");
+      if (!fileObj) {
+        throw new Error("Generation returned no outputs.");
       }
 
-      const glbUrl = fileObj.url;
+      console.log("[ShapeCast] Resolved fileObj:", fileObj);
+
+      const pathVal = fileObj.url || fileObj.path;
+      if (typeof pathVal !== "string") {
+        throw new Error("Generation returned no valid 3D model path or URL.");
+      }
+
+      // If it is a relative path, resolve it with the Space root URL
+      const rootUrl = app.config?.root || "https://tencent-hunyuan3d-2.hf.space";
+      const cleanRoot = rootUrl.endsWith("/") ? rootUrl.slice(0, -1) : rootUrl;
+
+      const glbUrl = pathVal.startsWith("http")
+        ? pathVal
+        : `${cleanRoot}/file=${pathVal.startsWith("/") ? pathVal : `/${pathVal}`}`;
+
       console.log("[ShapeCast] final GLB URL:", glbUrl);
       addLog("✓ 3D model generated successfully!");
 
