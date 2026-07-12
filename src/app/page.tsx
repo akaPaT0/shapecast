@@ -169,7 +169,10 @@ export default function Home() {
       console.log("[ShapeCast] Resolved fileObj:", fileObj);
       addLog("Debug model payload: " + JSON.stringify(fileObj));
 
-      const pathVal = fileObj.url || fileObj.path;
+      // Extract details from nested value property if present
+      const fileDetails = (fileObj.value || fileObj) as Record<string, unknown>;
+
+      const pathVal = fileDetails.url || fileDetails.path;
       if (typeof pathVal !== "string") {
         throw new Error("Generation returned no valid 3D model path or URL.");
       }
